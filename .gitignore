@@ -5,6 +5,9 @@ elevatorTrackerv6.pt
 elevatorTrackerv7.pt
 yolo26n.pt
 /__pycache__/
+**/__pycache__/
+.pytest_cache/
+data/
 
 # learningmodel.py outputs
 runs/

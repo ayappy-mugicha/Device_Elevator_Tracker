@@ -7,7 +7,13 @@ import mqtt_pub
 import config
 from datetime import datetime
 import asyncio
+from pathlib import Path
 from ultralytics import YOLO
+
+from hard_example import HardExampleDetector, pick_best_bbox
+from sample_queue import SampleQueue
+from upload_client import UploadClient
+
 
 def setup_camera(): # カメラの初期化
     cap = cv2.VideoCapture(config.settings.CAMERA_ID)
@@ -57,7 +63,49 @@ def judgementElecator(df_elevator, model_elevator, max_conf): # エレベータ�
         return [elevator_floor, direction, result_conf]
     else:
         return [elevator_floor, direction, result_conf]
-    
+
+
+def _maybe_save_hard_example(
+    detector: HardExampleDetector,
+    queue: SampleQueue,
+    uploader: UploadClient,
+    frame,
+    df_elevator,
+    elevator_floor,
+    direction,
+    result_conf,
+):
+    if not config.settings.HARD_EXAMPLE_ENABLED:
+        return
+
+    rows = []
+    if df_elevator is not None and not df_elevator.empty:
+        rows = df_elevator.to_dict("records")
+    bbox = pick_best_bbox(rows)
+    has_detection = bool(rows)
+    decision = detector.observe(
+        floor=elevator_floor,
+        direction=direction,
+        confidence=result_conf,
+        bbox=bbox,
+        now=time.time(),
+        has_detection=has_detection,
+    )
+    if not decision.is_hard:
+        return
+
+    result = queue.enqueue(
+        frame,
+        reason=decision.reason,
+        confidence=decision.confidence,
+        predicted_floor=elevator_floor,
+        predicted_direction=direction,
+        bbox=decision.bbox,
+    )
+    if result.saved and result.meta_path and result.image_path:
+        upload = uploader.maybe_upload(result.meta_path, result.image_path)
+        if upload.attempted and not upload.success:
+            print(f"⚠️ hard-example upload failed: {upload.detail}")
 
     
 async def main():
@@ -68,8 +116,35 @@ async def main():
         person_conf = float(0.7) # 人物検出の信頼度の閾値を0.7に設定（誤検出を減らすため）
         elevator_conf = float(0.3) # エレベーターの数字・矢印検出の信頼度の閾値を0.3に設定（小さめにして見逃しを減らすため）
         client_id="elevator_publisher"
+        headless = bool(config.settings.HEADLESS)
+        interval_sec = float(config.settings.INFERENCE_INTERVAL_SEC)
+
+        detector = HardExampleDetector(
+            conf_low=config.settings.HARD_CONF_LOW,
+            conf_high=config.settings.HARD_CONF_HIGH,
+            miss_frames=config.settings.HARD_MISS_FRAMES,
+            min_interval_sec=config.settings.HARD_MIN_INTERVAL_SEC,
+            floor_jump_threshold=config.settings.HARD_FLOOR_JUMP_THRESHOLD,
+        )
+        queue = SampleQueue(
+            root_dir=Path(config.settings.HARD_EXAMPLE_DIR),
+            daily_budget_bytes=config.settings.DAILY_UPLOAD_BUDGET_BYTES,
+            jpeg_quality=config.settings.HARD_JPEG_QUALITY,
+            max_long_edge=config.settings.HARD_MAX_LONG_EDGE,
+            device_id=config.settings.DEVICE_ID,
+        )
+        uploader = UploadClient(
+            enabled=config.settings.UPLOAD_ENABLED,
+            url=config.settings.UPLOAD_URL,
+            timeout_sec=config.settings.UPLOAD_TIMEOUT_SEC,
+        )
         
         print("--- 🚀 リアルタイム監視システム起動 ---")
+        print(f"HEADLESS={headless} INFERENCE_INTERVAL_SEC={interval_sec}")
+        print(
+            f"HARD_EXAMPLE_ENABLED={config.settings.HARD_EXAMPLE_ENABLED} "
+            f"UPLOAD_ENABLED={config.settings.UPLOAD_ENABLED}"
+        )
         # モデルの読み込み
         print("\n⏳ モデルをロードしています...")
         model_people =YOLO(config.settings.YOLO_AI_MODEL_PASS)  # 人物検出用のモデルをロード
@@ -107,19 +182,27 @@ async def main():
                     print("❌ カメラからフレームを取得できませんでした。終了します。")
                     continue
                 
-                # time.sleep(0.5) # 遅延を擬似再現
-                
                 # --- AI検出実行 ---
                 result =await asyncio.gather(
                     detect_objects(model_people, frame, imgsz=image_size, conf=person_conf, classes=[0]),  # クラス0は通常 'person'
                     detect_objects(model_elevator, frame, imgsz=image_size, conf=elevator_conf)  # エレベーターは全クラス対象
                 )
-                # time.sleep(0.6) # 遅延を擬似再現
                 df_people, res_p = result[0] # 人物検出の結果
                 df_elevator, res_e = result[1] # エレベーター検出の結果
                 people_count = len(df_people) # 人数をカウント
                 
                 elevator_floor, direction, result_conf = judgementElecator(df_elevator, model_elevator, max_conf) # エレベーターの表示内容と方向を判定
+
+                _maybe_save_hard_example(
+                    detector,
+                    queue,
+                    uploader,
+                    frame,
+                    df_elevator,
+                    elevator_floor,
+                    direction,
+                    result_conf,
+                )
                 
                 # 3. ターミナルへのログ出力
                 now = datetime.now()
@@ -127,54 +210,40 @@ async def main():
                 print(f"{now_str} | {people_count}人 | {elevator_floor} | {direction} | {result_conf:.2f}")
 
                 asyncio.gather(mqtt_pub.publish_elevator_status(client, config.settings.MQTT_TOPIC, config.settings.DEVICE_ID,elevator_floor,people_count,direction)) # MQTTでエレベーターの状態を送信
-                # time.sleep(0.3) # 遅延を擬似再現
-                #client, topic, elevator_id,current_floor,occupancy,direction
 
-                # asyncio.gather(display_window(elevator_floor, direction, people_count, df_elevator, res_p, res_e)) # ウィンドウに情報を表示
-                
-                #  ---------------ウィンドウを画面に表示する---------------
-                
-                # 表示用のテキストを合成（例: "9 up"）
-                display_floorwindow = f"{elevator_floor} ".strip()
-                # 4. 画面描画
-                # 人物の検出枠を描画
-                annotated_frame = res_p.plot()
-                # エレベーター（数字・矢印）の検出枠を上書き描画
-                
-                annotated_frame = res_e.plot(img=annotated_frame)
+                if not headless:
+                    display_floorwindow = f"{elevator_floor} ".strip()
+                    annotated_frame = res_p.plot()
+                    annotated_frame = res_e.plot(img=annotated_frame)
+                    info_text = f"People: {people_count}  Floor: {display_floorwindow} direction: {direction}"
+                    cv2.putText(
+                        annotated_frame, info_text, (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+                    )
+                    cv2.imshow("Real-time AI Monitor", annotated_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
 
-                # 左上に情報を表示
-                info_text = f"People: {people_count}  Floor: {display_floorwindow} direction: {direction}" 
+                if interval_sec > 0:
+                    await asyncio.sleep(interval_sec)
                 
-                cv2.putText(
-                    annotated_frame, info_text, (20, 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
-                )
-
-                # 5. ウィンドウ表示
-                cv2.imshow("Real-time AI Monitor", annotated_frame)
-
-                # 'q' キーで終了
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                
-                # ---------------ウィンドウを画面に表示する---------------
-            # 後片付け
             except Exception as e:
                 print(f"❌ エラー: {e}")
             except KeyboardInterrupt:
                 print("\n--- ⌨️ キーボード割り込みで終了 ---")
                 cap.release()
-                cv2.destroyAllWindows()
+                if not headless:
+                    cv2.destroyAllWindows()
                 print("\n--- 👋 システムを終了しました ---")
 
         # 後片付け
+        cap.release()
+        if not headless:
+            cv2.destroyAllWindows()
     except Exception as e:
         print(f"❌ エラー: {e}")
     except KeyboardInterrupt:
         print("\n--- ⌨️ キーボード割り込みで終了 ---")
-        cap.release()
-        cv2.destroyAllWindows()
         print("\n--- 👋 システムを終了しました ---")
 
 if __name__ == "__main__":
