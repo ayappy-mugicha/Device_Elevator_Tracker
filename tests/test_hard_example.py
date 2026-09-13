@@ -1,5 +1,3 @@
-import time
-
 from hard_example import HardExampleDetector, pick_best_bbox
 
 
@@ -103,6 +101,45 @@ def test_min_interval_throttles():
     )
     assert second.is_hard is False
     assert second.reason == "throttled"
+
+
+def test_throttled_floor_jump_can_retry():
+    detector = HardExampleDetector(
+        conf_low=0.9,
+        conf_high=0.95,
+        min_interval_sec=5.0,
+        floor_jump_threshold=2,
+    )
+    detector.observe(
+        floor="3",
+        direction="up",
+        confidence=0.99,
+        bbox=None,
+        now=1.0,
+        has_detection=True,
+    )
+    # Force a recent save timestamp via uncertain path first
+    detector._last_saved_at = 10.0
+    throttled = detector.observe(
+        floor="8",
+        direction="up",
+        confidence=0.99,
+        bbox=None,
+        now=12.0,
+        has_detection=True,
+    )
+    assert throttled.is_hard is False
+    assert throttled.reason == "throttled"
+    retried = detector.observe(
+        floor="8",
+        direction="up",
+        confidence=0.99,
+        bbox=None,
+        now=20.0,
+        has_detection=True,
+    )
+    assert retried.is_hard is True
+    assert retried.reason == "floor_jump"
 
 
 def test_pick_best_bbox():

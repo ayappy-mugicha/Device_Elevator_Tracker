@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -113,7 +113,8 @@ class SampleQueue:
         if used + len(payload) > self.daily_budget_bytes:
             return EnqueueResult(False, "budget_exceeded", bytes_used_today=used)
 
-        ts = now or datetime.now(timezone.utc)
+        ts = now or datetime.now()
+        day = ts.date() if isinstance(ts, datetime) else date.today()
         sample_id = f"{ts.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
         image_name = f"{sample_id}.jpg"
         meta_name = f"{sample_id}.json"
@@ -138,7 +139,7 @@ class SampleQueue:
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         new_used = used + len(payload) + meta_path.stat().st_size
-        self._save_budget(new_used, ts.date())
+        self._save_budget(new_used, day)
         return EnqueueResult(True, "saved", meta_path, image_path, new_used)
 
     def _load_budget(self) -> Dict[str, Any]:

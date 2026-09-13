@@ -323,6 +323,7 @@ flowchart TD
 | `mqtt_pub.py` | 状態テレメトリ（学習用画像転送とは分離） |
 | `config.py` | モデルパス・画像サイズ等の設定 |
 | [server-active-learning-requirements.md](./server-active-learning-requirements.md) | サーバー機能要件（HTTPS 準備後に実装） |
+| [edge-active-learning-usage.md](./edge-active-learning-usage.md) | エッジ MVP の使い方 |
 
 ---
 

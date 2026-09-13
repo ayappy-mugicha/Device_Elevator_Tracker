@@ -70,15 +70,17 @@ class HardExampleDetector:
         ):
             reason = "floor_jump"
 
-        if floor_int is not None:
-            self._last_floor = floor_int
-
         if not reason:
+            if floor_int is not None:
+                self._last_floor = floor_int
             return HardExampleDecision(False, "", conf, bbox)
 
         if now - self._last_saved_at < self.min_interval_sec:
+            # Keep previous floor so a throttled floor_jump can be retried.
             return HardExampleDecision(False, "throttled", conf, bbox)
 
+        if floor_int is not None:
+            self._last_floor = floor_int
         self._last_saved_at = now
         return HardExampleDecision(True, reason, conf, bbox)
 

@@ -37,32 +37,28 @@ async def detect_objects(model, frame, imgsz, conf=0.6, classes=None, verbose=Fa
     return df, results[0] # DataFrameとYOLOの結果オブジェクトを返す
 
 
-def judgementElecator(df_elevator, model_elevator, max_conf): # エレベーターの表示内容と方向を判定する関数
+def judgementElecator(df_elevator, model_elevator, max_conf=0.0): # エレベーターの表示内容と方向を判定する関数
     elevator_floor = 0 # エレベーターの表示内容（階数）を初期化
     direction = 0 # エレベーターの方向を初期化
-    result_conf = 0.0 # エレベーターの検出結果
-    
-    if not df_elevator.empty: # エレベーターの検出結果がある場合
-        # 全ての検出結果をループでチェックする
-        for _, row in df_elevator.iterrows():
-            class_id = int(row['class'])
-            label = model_elevator.names[class_id]
-            conf = row['confidence']
+    result_conf = float(max_conf) # フレーム内の最大確信度
 
-            # スコアが一番高いものをログ用の確信度にする
-            if conf > max_conf:
-                result_conf = conf
+    if df_elevator.empty:
+        return [elevator_floor, direction, result_conf]
 
-            # ラベルが数字（'9','10'など）か判定
-            if label.isdigit():
-                elevator_floor = label.strip()
-            # ラベルが矢印（'up','down'）か判定
-            
-            if label in ['up', 'down']:
-                direction = label
-        return [elevator_floor, direction, result_conf]
-    else:
-        return [elevator_floor, direction, result_conf]
+    for _, row in df_elevator.iterrows():
+        class_id = int(row['class'])
+        label = model_elevator.names[class_id]
+        conf = float(row['confidence'])
+
+        if conf > result_conf:
+            result_conf = conf
+
+        if label.isdigit():
+            elevator_floor = label.strip()
+
+        if label in ['up', 'down']:
+            direction = label
+    return [elevator_floor, direction, result_conf]
 
 
 def _maybe_save_hard_example(
@@ -112,7 +108,6 @@ async def main():
 # def main():
     try:
         image_size = config.settings.INFERENCE_IMAGE_SIZE
-        max_conf = 0.0 # エレベーターの検出結果の中で最も高い確信度を記録する変数
         person_conf = float(0.7) # 人物検出の信頼度の閾値を0.7に設定（誤検出を減らすため）
         elevator_conf = float(0.3) # エレベーターの数字・矢印検出の信頼度の閾値を0.3に設定（小さめにして見逃しを減らすため）
         client_id="elevator_publisher"
@@ -191,7 +186,7 @@ async def main():
                 df_elevator, res_e = result[1] # エレベーター検出の結果
                 people_count = len(df_people) # 人数をカウント
                 
-                elevator_floor, direction, result_conf = judgementElecator(df_elevator, model_elevator, max_conf) # エレベーターの表示内容と方向を判定
+                elevator_floor, direction, result_conf = judgementElecator(df_elevator, model_elevator)
 
                 _maybe_save_hard_example(
                     detector,
@@ -209,7 +204,14 @@ async def main():
                 now_str = now.strftime(f"%Y/%m/%d  %H:%M:%S")
                 print(f"{now_str} | {people_count}人 | {elevator_floor} | {direction} | {result_conf:.2f}")
 
-                asyncio.gather(mqtt_pub.publish_elevator_status(client, config.settings.MQTT_TOPIC, config.settings.DEVICE_ID,elevator_floor,people_count,direction)) # MQTTでエレベーターの状態を送信
+                await mqtt_pub.publish_elevator_status(
+                    client,
+                    config.settings.MQTT_TOPIC,
+                    config.settings.DEVICE_ID,
+                    elevator_floor,
+                    people_count,
+                    direction,
+                )
 
                 if not headless:
                     display_floorwindow = f"{elevator_floor} ".strip()
